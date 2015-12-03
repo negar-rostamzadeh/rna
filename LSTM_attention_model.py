@@ -56,7 +56,7 @@ class LSTMAttention(BaseRecurrent, Initializable):
         pre_1 = tensor.dot(x, self.w_1_mlp) + self.b_1_mlp
         act_1 = relu(pre_1)
         pre_2 = (tensor.dot(act_1, self.w_2_mlp) + self.b_2_mlp +
-                 np.asarray([0, 0, -1.0, -0.1],
+                 np.asarray([0, 0, -1.0, -1.0],
                             dtype='float32'))
         act_2 = tanh(pre_2)
         return act_2
@@ -133,12 +133,7 @@ class LSTMAttention(BaseRecurrent, Initializable):
     # input: B x C x X x Y
     # output: B x C x X x Y
     def pre_process(self, x):
-        xx = x.dimshuffle(0, 2, 3, 1)
-        xx = xx.dimshuffle(0, 'x', 1, 2, 3)
-        xx = xx[:, :, :, :, [2, 1, 0]]
-        xx = xx.dimshuffle((0, 1, 4, 2, 3)) * 255
-        xx = xx.reshape((xx.shape[0], xx.shape[1] * xx.shape[2],
-                         xx.shape[3], xx.shape[4]))
+        xx = x[:, [2, 1, 0], :, :] * 255
         xx = xx - (
             np.array([104, 117, 123])[None, :, None, None]).astype('float32')
         return xx
@@ -218,11 +213,10 @@ class LSTMAttention(BaseRecurrent, Initializable):
     def test(self, inputs):
         inputs2 = self.pre_process(inputs[0])
         conved_part_1 = self.apply_conv(
-            inputs2, conv_layers=self.conv_layers[0:7])
-        conved_part_2 = self.apply_conv(
-            conved_part_1, conv_layers=self.conv_layers[7:])
-        flat_conved_part_2 = conved_part_2.flatten(2)
-        pre_lstm = self.apply_fc(flat_conved_part_2)
+            inputs2,
+            conv_layers=self.conv_layers)
+        flat_conved_part_1 = conved_part_1.flatten(2)
+        pre_lstm = self.apply_fc(flat_conved_part_1)
         return pre_lstm
 
     @recurrent(sequences=['inputs', 'mask'],
@@ -250,6 +244,8 @@ class LSTMAttention(BaseRecurrent, Initializable):
         conved_part_1 = self.apply_conv(
             inputs_normal,
             conv_layers=self.conv_layers[0:self.num_layers_first_half_of_conv])
+        if self.num_channels == 3:
+            conved_part_1 = conved_part_1 / 255.0
 
         # inputs shape:  B x C x X x Y
         # outputs shape: B x 1 x X x Y
