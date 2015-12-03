@@ -56,6 +56,19 @@ def setup_model(configs):
     error_rate.name = 'ER'
     model.cost = cost
 
+    if configs['load_pretrained']:
+        blocks_model = Model(model.cost)
+        all_params = blocks_model.parameters
+        with open('VGG_CNN_params.npz') as f:
+            loaded = np.load(f)
+            all_conv_params = loaded.keys()
+            for param in all_params:
+                if param.name in loaded.keys():
+                    assert param.get_value().shape == loaded[param.name].shape
+                    param.set_value(loaded[param.name])
+                    all_conv_params.pop(all_conv_params.index(param.name))
+        print "the following parameters did not match: " + str(all_conv_params)
+
     if configs['test_model']:
         cg = ComputationGraph(model.cost)
         f = theano.function(cg.inputs, [model.cost],
@@ -63,20 +76,8 @@ def setup_model(configs):
                             allow_input_downcast=True)
         data = np.random.randn(10, 40, 3, 224, 224)
         targs = np.random.randn(40, 101)
-        import ipdb; ipdb.set_trace()
         f(data, targs)
         print "Test passed! ;)"
-    import ipdb; ipdb.set_trace()
-
-    if configs['load_pretrained']:
-        blocks_model = Model(model.cost)
-        all_params = blocks_model.parameters
-        with open('VGG_CNN_params.npz') as f:
-            loaded = np.load(f)
-            for param in all_params:
-                if param.name in loaded.keys():
-                    assert param.get_value().shape == loaded[param.name].shape
-                    param.set_value(loaded[param.name])
 
     model.monitorings = [cost, error_rate]
 
@@ -267,7 +268,7 @@ if __name__ == "__main__":
             configs['lrs'] = [1e-4, 1e-5]
             configs['until_which_epoch'] = [30, configs['num_epochs']]
             configs['grad_clipping'] = 5
-            configs['conv_layers'] = [                                       # 3   x 224 x 224 --> 3 x 14 x 14
+            configs['conv_layers'] = [                            # 3   x 224 x 224 --> 3 x 14 x 14
                 ['conv_1_1', (64, 3, 3, 3), None, None],          # 64  x 14  x 14
                 ['conv_1_2', (64, 64, 3, 3), None, None],         # 64  x 14  x 14
                 # ['conv_1_2', (64, 64, 3, 3), (2, 2), None],
@@ -287,7 +288,8 @@ if __name__ == "__main__":
                 ['conv_5_3', (512, 512, 3, 3), (2, 2), None]]     # 512 x 7   x 7
             configs['num_layers_first_half_of_conv'] = 0
             configs['fc_layers'] = [['fc6', (25088, 4096), 'relu'],
-                                    ['fc7', (4096, 4096), 'relu']]
+                                    ['fc7', (4096, 4096), 'relu'],
+                                    ['fc8-1', (4096, 101), 'lin']]
             configs['lstm_dim'] = 256
             configs['attention_mlp_hidden_dims'] = [128]
             configs['cropper_input_shape'] = (224, 224)
