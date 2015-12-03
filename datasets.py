@@ -429,7 +429,7 @@ class JpegHDF5Transformer(Transformer):
                  swap_rgb=False,
                  crop_type='random',
                  scale=1.,
-                 nb_frames= 25,
+                 nb_frames= 20,
                  *args, **kwargs):
 
         self.rng = kwargs.pop('rng', None)
@@ -549,7 +549,12 @@ class JpegHDF5Transformer(Transformer):
         if request is not None:
             raise ValueError
         batch = next(self.child_epoch_iterator)
+        # B x T x X x Y x C
         images, labels = self.preprocess_data(batch)
+        images = images.swapaxes(0, 1)
+        images = images[:, :, np.newaxis]
+        images = images.swapaxes(2, 5)
+        images = images[:, :, :, :, :, 0]
         return images, labels
 
     def preprocess_data(self, batch):
@@ -565,7 +570,7 @@ class JpegHDF5Transformer(Transformer):
                      dtype='float32')
         y = np.empty(num_videos, dtype='int64')
         for i in xrange(num_videos):
-            y[i] = batch[1][i * fpv]
+            y[i] = translate[batch[1][i * fpv]]
             do_flip = self.rng.rand(1)[0]
             bbox = self.crop()
 
@@ -605,6 +610,111 @@ class JpegHDF5Transformer(Transformer):
         return (x, y)
 
 
+translate = {
+    67: 52,
+    9: 93,
+    71: 82,
+    30: 76,
+    8: 24,
+    47: 0,
+    87: 66,
+    51: 100,
+    95: 60,
+    93: 58,
+    32: 15,
+    74: 95,
+    68: 4,
+    97: 59,
+    4: 86,
+    55: 71,
+    33: 29,
+    75: 1,
+    85: 18,
+    23: 32,
+    35: 41,
+    7: 61,
+    28: 57,
+    80: 20,
+    59: 99,
+    46: 23,
+    82: 28,
+    58: 35,
+    40: 14,
+    2: 83,
+    24: 94,
+    0: 54,
+    22: 90,
+    21: 63,
+    90: 70,
+    98: 21,
+    48: 55,
+    50: 74,
+    76: 88,
+    18: 49,
+    45: 72,
+    83: 62,
+    12: 96,
+    86: 77,
+    84: 45,
+    99: 25,
+    34: 46,
+    16: 67,
+    19: 79,
+    39: 16,
+    53: 43,
+    25: 30,
+    100: 26,
+    61: 47,
+    60: 38,
+    64: 65,
+    54: 89,
+    56: 68,
+    26: 39,
+    66: 8,
+    15: 17,
+    3: 69,
+    73: 84,
+    57: 73,
+    41: 13,
+    31: 80,
+    96: 97,
+    36: 7,
+    88: 98,
+    11: 27,
+    49: 11,
+    14: 6,
+    70: 12,
+    92: 22,
+    29: 5,
+    63: 64,
+    37: 92,
+    27: 85,
+    42: 51,
+    79: 81,
+    6: 3,
+    10: 53,
+    89: 34,
+    52: 78,
+    44: 2,
+    17: 87,
+    13: 31,
+    5: 42,
+    69: 44,
+    20: 75,
+    94: 48,
+    43: 56,
+    77: 40,
+    72: 37,
+    38: 19,
+    81: 50,
+    91: 10,
+    65: 36,
+    1: 9,
+    78: 33,
+    62: 91,
+}
+
+
 def get_ucf_streams(batch_size):
     train_dataset = JpegHDF5Dataset("train")
     valid_dataset = JpegHDF5Dataset("valid")
@@ -616,7 +726,7 @@ def get_ucf_streams(batch_size):
             train_dataset.video_indexes,
             examples=train_dataset.num_video_examples,
             batch_size=batch_size,
-            frames_per_video=15)))
+            frames_per_video=20)))
 
     valid_datastream = ForceFloatX(DataStream(
         dataset=valid_dataset,
@@ -624,7 +734,7 @@ def get_ucf_streams(batch_size):
             valid_dataset.video_indexes,
             examples=valid_dataset.num_video_examples,
             batch_size=batch_size,
-            frames_per_video=15)))
+            frames_per_video=20)))
 
     test_datastream = ForceFloatX(DataStream(
         dataset=test_dataset,
@@ -632,19 +742,22 @@ def get_ucf_streams(batch_size):
             test_dataset.video_indexes,
             examples=test_dataset.num_video_examples,
             batch_size=batch_size,
-            frames_per_video=15)))
+            frames_per_video=20)))
 
     train_datastream = JpegHDF5Transformer(data_stream=train_datastream)
     valid_datastream = JpegHDF5Transformer(data_stream=valid_datastream)
     test_datastream = JpegHDF5Transformer(data_stream=test_datastream)
-
-    import ipdb; ipdb.set_trace()
 
     train_datastream.sources = ('features', 'targets')
     valid_datastream.sources = ('features', 'targets')
     test_datastream.sources = ('features', 'targets')
 
     return train_datastream, valid_datastream
+
+
+# tds, vds = get_ucf_streams(60)
+# data = tds.get_epoch_iterator().next()
+# import ipdb; ipdb.set_trace()
 
 # tds, vds = get_cmv_v2_streams(60)
 # data = tds.get_epoch_iterator().next()
