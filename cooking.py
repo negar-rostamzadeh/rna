@@ -1,4 +1,3 @@
-import sys
 import logging
 import os
 import time
@@ -6,7 +5,7 @@ import numpy as np
 import theano.tensor as T
 from theano import config
 import theano
-from blocks.algorithms import (GradientDescent, Adam,
+from blocks.algorithms import (GradientDescent, Adam, Momentum,
                                CompositeRule, StepClipping)
 from blocks.extensions import FinishAfter, Printing, ProgressBar
 from blocks.bricks.cost import CategoricalCrossEntropy, MisclassificationRate
@@ -31,6 +30,8 @@ def setup_model(configs):
     tensor5 = theano.tensor.TensorType(config.floatX, (False,) * 5)
     # shape: T x B x C x X x Y
     input_ = tensor5('features')
+    tensor3 = theano.tensor.TensorType(config.floatX, (False,) * 3)
+    locs = tensor3('locs')
     # shape: B x Classes
     target = T.ivector('targets')
 
@@ -41,7 +42,7 @@ def setup_model(configs):
     model.initialize()
 
     (h, c, location, scale, alpha, patch, downn_sampled_input,
-        conved_part_1, conved_part_2, pre_lstm) = model.apply(input_)
+        conved_part_1, conved_part_2, pre_lstm) = model.apply(input_, locs)
 
     model.location = location
     model.scale = scale
@@ -78,16 +79,16 @@ def setup_model(configs):
         print "the following parameters did not match: " + str(all_conv_params)
 
     if configs['test_model']:
-        print "\nTESTING THE MODEL: CHECK THE INPUT SIZE!"
+        print "TESTING THE MODEL: CHECK THE INPUT SIZE!"
         cg = ComputationGraph(model.cost)
         f = theano.function(cg.inputs, [model.cost],
                             on_unused_input='ignore',
                             allow_input_downcast=True)
         data = configs['get_streams'](configs[
             'batch_size'])[0].get_epoch_iterator().next()
-        f(data[1], data[0])
+        f(data[1], data[0], data[2])
 
-        print "TEST PASSED! ;)\n"
+        print "Test passed! ;)"
 
     model.monitorings = [cost, error_rate]
 
@@ -135,8 +136,7 @@ def train(model, configs):
     step_rule = CompositeRule([clipping, adam])
     training_algorithm = GradientDescent(
         cost=model.cost, parameters=all_params,
-        step_rule=step_rule,
-        on_unused_sources='warn')
+        step_rule=step_rule)
 
     monitored_variables = [
         lr_var,
@@ -184,7 +184,6 @@ def train(model, configs):
 
 
 def evaluate(model, load_path, configs):
-    print "FIX THIS"
     with open(load_path + 'trained_params_best.npz') as f:
         loaded = np.load(f)
         blocks_model = Model(model.cost)
@@ -209,10 +208,11 @@ def evaluate(model, load_path, configs):
 
 
 if __name__ == "__main__":
-    dataset = str(sys.argv[1])
-    logging.basicConfig(level=logging.INFO)
-    configs = {}
-    if dataset == 'bmnist':
+        logging.basicConfig(level=logging.INFO)
+
+        configs = {}
+        # from datasets import get_cmv_v2_len10_streams
+        # from datasets import get_cmv_v1_streams
         from datasets import get_bmnist_streams
         configs['get_streams'] = get_bmnist_streams
         configs['save_path'] = 'results/Test_'
@@ -222,13 +222,12 @@ if __name__ == "__main__":
         configs['until_which_epoch'] = [150, 400, configs['num_epochs']]
         configs['grad_clipping'] = 2
         configs['weight_noise'] = 0.0
-        configs['conv_layers'] = []
-        # configs['conv_layers'] = [                          # 1  x 28  x 28
-        #     ['conv_1', (20, 1, 5, 5), (2, 2), None],        # 20 x 16 x 16
-        #     ['conv_2', (50, 20, 5, 5), (2, 2), None],       # 50 x 10 x 10
-        #     ['conv_3', (80, 50, 3, 3), (2, 2), None]]       # 80 x 6 x 6
+        configs['conv_layers'] = [                          # 1  x 28  x 28
+            ['conv_1', (20, 1, 5, 5), (2, 2), None],        # 20 x 16 x 16
+            ['conv_2', (50, 20, 5, 5), (2, 2), None],       # 50 x 10 x 10
+            ['conv_3', (80, 50, 3, 3), (2, 2), None]]       # 80 x 6 x 6
         configs['num_layers_first_half_of_conv'] = 0
-        configs['fc_layers'] = [['fc', (784, 128), 'relu']]
+        configs['fc_layers'] = [['fc', (2880, 128), 'relu']]
         configs['lstm_dim'] = 128
         configs['attention_mlp_hidden_dims'] = [128]
         configs['cropper_input_shape'] = (100, 100)
@@ -238,48 +237,24 @@ if __name__ == "__main__":
         configs['load_pretrained'] = False
         configs['test_model'] = True
         configs['l2_reg'] = 0.001
+        timestr = time.strftime("%Y_%m_%d_at_%H_%M")
+        save_path = configs['save_path'] + timestr
+        configs['save_path'] = save_path
+        log_path = os.path.join(save_path, 'log.txt')
+        os.makedirs(save_path)
+        fh = logging.FileHandler(filename=log_path)
+        fh.setLevel(logging.DEBUG)
+        logger.addHandler(fh)
+        for item in configs:
+            logger.info(item + ': %s' % str(configs[item]))
 
-    elif dataset == 'cooking':
-        from datasets import get_cooking_streams
-        configs['get_streams'] = get_cooking_streams
-        configs['save_path'] = 'results/Test_'
-        configs['num_epochs'] = 600
-        configs['batch_size'] = 100
-        configs['lrs'] = [1e-4, 1e-5, 1e-6]
-        configs['until_which_epoch'] = [150, 400, configs['num_epochs']]
-        configs['grad_clipping'] = 2
-        configs['weight_noise'] = 0.0
-        configs['conv_layers'] = []
-        configs['num_layers_first_half_of_conv'] = 0
-        configs['fc_layers'] = [['fc', (784, 128), 'relu']]
-        configs['lstm_dim'] = 128
-        configs['attention_mlp_hidden_dims'] = [128]
-        configs['cropper_input_shape'] = (125, 200)
-        configs['patch_shape'] = (28, 28)
-        configs['num_channels'] = 3
-        configs['classifier_dims'] = [configs['lstm_dim'], 64, 10]
-        configs['load_pretrained'] = False
-        configs['test_model'] = True
-        configs['l2_reg'] = 0.001
+        model = setup_model(configs)
 
-    timestr = time.strftime("%Y_%m_%d_at_%H_%M")
-    save_path = configs['save_path'] + timestr
-    configs['save_path'] = save_path
-    log_path = os.path.join(save_path, 'log.txt')
-    os.makedirs(save_path)
-    fh = logging.FileHandler(filename=log_path)
-    fh.setLevel(logging.DEBUG)
-    logger.addHandler(fh)
-    for item in configs:
-        logger.info(item + ': %s' % str(configs[item]))
-
-    model = setup_model(configs)
-
-    eval_ = False
-    if eval_:
-        eval_function = evaluate(model, 'results/BMNIST_Learn_2016_02_25_at_23_50/', configs)
-        analyze('results/BMNIST_Learn_2016_02_25_at_23_50/')
-        visualize_attention(model, configs, eval_function)
-    else:
-        # evaluate(model, 'results/CMV_Hard_len10_2016_02_22_at_21_00/')
-        train(model, configs)
+        eval_ = False
+        if eval_:
+            eval_function = evaluate(model, 'results/BMNIST_Learn_2016_02_25_at_23_50/', configs)
+            analyze('results/BMNIST_Learn_2016_02_25_at_23_50/')
+            visualize_attention(model, configs, eval_function)
+        else:
+            # evaluate(model, 'results/CMV_Hard_len10_2016_02_22_at_21_00/')
+            train(model, configs)

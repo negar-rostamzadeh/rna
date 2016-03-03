@@ -1,4 +1,3 @@
-import math
 import theano
 import theano.tensor as T
 import numpy as np
@@ -21,24 +20,32 @@ class LocallySoftRectangularCropper(Brick):
         self.batched_window = hyperparameters["batched_window"]
         self.n_spatial_dims = len(patch_shape)
 
-    def compute_crop_matrices(self, locations, scales, Is):
+    def compute_crop_matrices(self, locations, scales, alphas, Is):
         Ws = []
         for axis in xrange(self.n_spatial_dims):
             n = T.cast(self.patch_shape[axis], 'float32')
-            I = T.cast(Is[axis], 'float32').dimshuffle('x', 0, 'x')    # (1, hardcrop_dim, 1)
-            J = T.arange(n).dimshuffle('x', 'x', 0)  # (1, 1, patch_dim)
+            I = T.cast(Is[axis], 'float32').dimshuffle('x', 0, 'x')
+            J = T.arange(n).dimshuffle('x', 'x', 0)
+            location = locations[:, axis].dimshuffle(0, 'x', 'x')
+            scale = scales[:, axis].dimshuffle(0, 'x', 'x')
+            alpha = alphas[:, axis].dimshuffle(0, 'x', 'x')
 
-            location = locations[:, axis].dimshuffle(0, 'x', 'x')   # (batch_size, 1, 1)
-            scale = scales[:, axis].dimshuffle(0, 'x', 'x')   # (batch_size, 1, 1)
+            centered_J = (J - 0.5 * n) / scale
+            max_val = n / (2.0 * scale)
+            inv = (T.log(1.01 + (alpha * scale) * centered_J / max_val) -
+                   T.log(1.01 - (alpha * scale) * centered_J / max_val)) / 2
+            J = (inv * max_val) / (alpha * scale) + location
 
-            # map patch index into image index space
-            J = (J - 0.5 * n) / scale + location                      # (batch_size, 1, patch_dim)
+            dx2 = (I - J) ** 2
+            # You know. Becuase of quantization, we don't get exactly zero
+            # So let's make them zero!
+            # import ipdb; ipdb.set_trace()
+            dx2 = dx2 - T.min(dx2, axis=1).flatten()
+            W, ret = self.kernel.density(dx2, scale, (alpha * scale), centered_J / max_val)
+            W = W / T.sum(W, axis=(0, 1))
+            Ws.append(W)
 
-            # compute squared pairwise distances
-            dx2 = (I - J) ** 2  # (batch_size, hardcrop_dim, patch_dim)
-
-            Ws.append(self.kernel.density(dx2, scale))
-        return Ws
+        return Ws, ret
 
     def compute_hard_windows(self, image_shape, location, scale):
         # find topleft(front) and bottomright(back) corners for each patch
@@ -67,119 +74,39 @@ class LocallySoftRectangularCropper(Brick):
 
         return a, b
 
-    @application(inputs="image image_shape location scale".split(), outputs=['patch'])
-    def apply(self, image, image_shape, location, scale):
+    @application(inputs="image image_shape location scale".split(),
+                 outputs=['patch', 'matrix', 'dx2'])
+    def apply(self, image, image_shape, location, scale, alpha):
         a, b = self.compute_hard_windows(image_shape, location, scale)
 
-        if self.batched_window:
-            patch = self.apply_inner(image, location, scale, a[0], b[0])
-        else:
-            def map_fn(image, image_shape, a, b, location, scale):
-                # apply_inner expects a batch axis
-                image = T.shape_padleft(image)
-                location = T.shape_padleft(location)
-                scale = T.shape_padleft(scale)
-
-                patch = self.apply_inner(image, location, scale, a, b)
-
-                # return without batch axis
-                return patch[0]
-
-            patch, _ = theano.map(map_fn,
-                                  sequences=[image, a, b, location, scale])
+        patch, matrix, dx2 = self.apply_inner(
+            image, location, scale, alpha, a[0], b[0])
 
         savings = (1 - T.cast((b - a).prod(axis=1), floatX) / image_shape.prod(axis=1))
         self.add_auxiliary_variable(savings, name="savings")
 
-        return patch
+        return patch, matrix, dx2
 
-    def apply_inner(self, image, location, scale, a, b):
+    def apply_inner(self, image, location, scale, alpha, a, b):
         slices = [theano.gradient.disconnected_grad(T.arange(a[i], b[i]))
                   for i in xrange(self.n_spatial_dims)]
         hardcrop = image[
             np.index_exp[:, :] +
             tuple(slice(a[i], b[i])
                   for i in range(self.n_spatial_dims))]
-        matrices = self.compute_crop_matrices(location, scale, slices)
+        matrices, dx2 = self.compute_crop_matrices(location, scale, alpha, slices)
         patch = hardcrop
         for axis, matrix in enumerate(matrices):
             patch = batched_tensordot(patch, matrix, [[2], [1]])
-        return patch
+        return patch, matrices[0], dx2
 
 
 class Gaussian(object):
-    def density(self, x2, scale):
-        sigma = self.sigma(scale)
-        volume = T.sqrt(2 * math.pi) * sigma
-        return T.exp(-0.5 * x2 / (sigma ** 2)) / volume
-
-    def sigma(self, scale):
-        # letting sigma vary smoothly with scale makes sense with a
-        # smooth input, but the image is discretized and beyond some
-        # point the kernels become so narrow that all the pixels are
-        # too far away to contribute.  the filter response fades to
-        # black.
-        # let's not let this happen; put a lower bound on sigma.
-        yuck = scale > 1.0
-        scale = (1 - yuck) * scale + yuck * 1.0
-        sigma = 0.5 / scale
-        return sigma
+    def density(self, x2, scale, alpha, rng):
+        tanhP = lambda x: 4 / (T.exp(x) + T.exp(-x)) ** 2
+        sa = tanhP(rng * alpha / scale * 1.9)
+        sigma = 0.5 / (scale * sa)
+        return T.exp(-0.5 * x2 / (sigma ** 2)), sa
 
     def k_sigma_radius(self, k, scale):
-        # this isn't correct in multiple dimensions, but it's good enough
-        return k * self.sigma(scale)
-
-
-if __name__ == "__main__":
-    from goodfellow_svhn import NumberTask
-    import matplotlib.pyplot as plt
-
-    batch_size = 10
-    task = NumberTask(batch_size=batch_size, hidden_dim=1, shrink_dataset_by=100)
-    batch = task.get_stream("valid").get_epoch_iterator(as_dict=True).next()
-    x_uncentered, y = task.get_variables()
-    x = task.preprocess(x_uncentered)
-    n_spatial_dims = 2
-    image_shape = batch["features"].shape[-n_spatial_dims:]
-    patch_shape = (16, 16)
-    cropper = LocallySoftRectangularCropper(n_spatial_dims=n_spatial_dims,
-                                            patch_shape=patch_shape,
-                                            image_shape=image_shape,
-                                            kernel=Gaussian())
-
-    scales = 1.3 ** np.arange(-7, 6)
-    n_patches = len(scales)
-
-    locations = (np.ones((n_patches, batch_size, 2)) * image_shape / 2).astype(np.float32)
-    scales = np.tile(scales[:, np.newaxis, np.newaxis], (1, batch_size, 2)).astype(np.float32)
-
-    Tpatches = T.stack(*[cropper.apply(x_uncentered, T.constant(location), T.constant(scale))
-                         for location, scale in zip(locations, scales)])
-
-    patches = theano.function([x_uncentered], Tpatches)(batch["features"])
-
-    m, n = batch_size, n_patches + 1
-
-    oh_imshow = dict(interpolation="none", cmap="gray", vmin=0.0, vmax=1.0, aspect="equal")
-
-    print patches.shape
-    for i in xrange(m):
-        image = batch["features"][i, 0]
-        image_ax = plt.subplot(m, n, i * n + 1)
-        plt.imshow(image, shape=image_shape, axes=image_ax, **oh_imshow)
-        # remove clutter
-        for side in "top left bottom right".split():
-            image_ax.tick_params(which="both", **{side: "off",
-                                                  "label%s" % side: "off"})
-
-        for j in xrange(1, n):
-            patch = patches[j - 1, i, 0]
-            location, scale = locations[j - 1, 0, 0], scales[j - 1, 0, 0]
-            patch_ax = plt.subplot(m, n, i * n + j + 1)
-            plt.imshow(patch, shape=patch.shape, axes=patch_ax, **oh_imshow)
-            plt.title("%3.2f" % scale)
-            # remove clutter
-            for side in "top left bottom right".split():
-                patch_ax.tick_params(which="both", **{side: "off",
-                                                      "label%s" % side: "off"})
-    plt.show()
+        return k

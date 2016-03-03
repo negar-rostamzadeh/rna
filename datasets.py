@@ -60,12 +60,11 @@ class Preprocessor_CMV_v1(Transformer):
         normed_feat = normed_feat.astype('float32')
         normed_feat = normed_feat[:, 5:15]
         B, T, X, Y, C = normed_feat.shape
-        transformed_data.append(
-            numpy.swapaxes(
-                normed_feat.reshape(
-                    (B, T, X * Y * C)),
-                0, 1))
-        # Now the data shape should be T x B x F
+        data0 = np.swapaxes(normed_feat, 0, 1)
+        data0 = np.swapaxes(data0, 2, 4)
+        data0 = np.swapaxes(data0, 3, 4)
+        transformed_data.append(data0.astype(floatX))
+        # Now the data0 shape should be T x B x C x X x Y
         transformed_data.append(data[1])
         return transformed_data
 
@@ -133,14 +132,9 @@ class Preprocessor_CMV_v2(Transformer):
         transformed_data = []
         features = [data_point[:, np.newaxis, :, :] for data_point in data[0]]
         features = np.hstack(features)
-        T, B, X, Y = features.shape
-        features = features.reshape(T, B, -1)
-        if len == 10:
-            features = features[5:15]
-
-        features = features[::2]
+        features = features[::2][:, :, np.newaxis]
         features = features.astype('float32')
-        # Now the data shape should be T x B x F
+        # Now the data shape should be T x B x 1 x X x Y
         transformed_data.append(features)
         transformed_data.append(data[1])
         return transformed_data
@@ -168,8 +162,6 @@ def get_cmv_v2_64_len10_streams(batch_size):
 
     train_datastream.sources = ('features', 'targets')
     valid_datastream.sources = ('features', 'targets')
-
-    return train_datastream, valid_datastream
 
 
 def get_cmv_v2_len20_streams(batch_size):
@@ -199,7 +191,7 @@ def get_cmv_v2_len20_streams(batch_size):
 
 
 def get_cmv_v2_len10_streams(batch_size):
-    path = '/data/lisatmp3/cooijmat/datasets/cmv/cmv20x100x100_png.hdf5'
+    path = '/data/lisatmp4/negar/cmv20x100x100_png_1.hdf5'
     train_dataset = CMVv2(path=path, which_set="train")
     valid_dataset = CMVv2(path=path, which_set="valid")
     train_ind = numpy.arange(train_dataset.num_examples)
@@ -222,102 +214,6 @@ def get_cmv_v2_len10_streams(batch_size):
     valid_datastream.sources = ('features', 'targets')
 
     return train_datastream, valid_datastream
-
-
-class CookingDataset(fuel.datasets.H5PYDataset):
-    def __init__(self, path, which_set):
-        file = h5py.File(path, "r")
-        super(CookingDataset, self).__init__(
-            file, sources=tuple("videos targets".split()),
-            which_sets=(which_set,), load_in_memory=True)
-        self.frames = np.array(file["frames"][which_set])
-        file.close()
-
-    def get_data(self, *args, **kwargs):
-        video_ranges, targets = super(
-            CookingDataset, self).get_data(*args, **kwargs)
-        videos = list(map(self.video_from_jpegs, video_ranges))
-        return videos, targets
-
-    def video_from_jpegs(self, video_range):
-        frames = self.frames[video_range[0]:video_range[0] + video_range[1]]
-        video = np.array(map(self.load_frame, frames))
-        return video
-
-    def load_frame(self, jpeg):
-        image = Image.open(StringIO(jpeg.tostring())).convert("RGB")
-        image = (np.array(image.getdata(), dtype=np.float32)
-                 .reshape((image.size[1], image.size[0], 3)))
-        image /= 255.0
-        return image
-
-
-class Preprocessor_Cooking(Transformer):
-    def __init__(self, data_stream, **kwargs):
-        super(Preprocessor_Cooking, self).__init__(
-            data_stream, **kwargs)
-
-    def get_data(self, request=None):
-        data = next(self.child_epoch_iterator)
-        videos = np.zeros((len(data[0]), 10,
-                           data[0][0].shape[1],
-                           data[0][0].shape[2],
-                           data[0][0].shape[3]))
-        for i, video in enumerate(data[0]):
-            length = video.shape[0]
-            inds = np.linspace(0, length - 1, num=10).astype('int32')
-            videos[i] = video[inds]
-        videos = videos[:, :, np.newaxis, :, :, :]
-        videos = np.swapaxes(videos, 2, 5)[:, :, :, :, :, 0]
-        videos = np.swapaxes(videos, 0, 1)
-        transformed_data = []
-        videos = videos.astype('float32')
-        # Now the data shape should be T x B x C x X x Y
-        transformed_data.append(videos)
-        transformed_data.append(data[1])
-        return transformed_data
-
-
-def get_cooking_streams(batch_size):
-    path = '/part/01/Tmp/pezeshki/HDF5_v5.hdf5'
-    train_dataset = CookingDataset(path=path, which_set="train")
-    valid_dataset = CookingDataset(path=path, which_set="val")
-    test_dataset = CookingDataset(path=path, which_set="test")
-    train_ind = numpy.arange(train_dataset.num_examples)
-    valid_ind = numpy.arange(valid_dataset.num_examples)
-    test_ind = numpy.arange(test_dataset.num_examples)
-    rng = numpy.random.RandomState(seed=1)
-    rng.shuffle(train_ind)
-    rng.shuffle(valid_ind)
-    rng.shuffle(test_ind)
-
-    train_datastream = DataStream.default_stream(
-        train_dataset,
-        iteration_scheme=ShuffledScheme(train_ind, batch_size))
-    # import ipdb; ipdb.set_trace()
-    train_datastream = Preprocessor_Cooking(train_datastream)
-
-    # data = train_datastream.get_epoch_iterator(as_dict=True).next()
-    # import ipdb; ipdb.set_trace()
-
-    valid_datastream = DataStream.default_stream(
-        valid_dataset,
-        iteration_scheme=ShuffledScheme(valid_ind, batch_size))
-    valid_datastream = Preprocessor_Cooking(valid_datastream)
-
-    test_datastream = DataStream.default_stream(
-        test_dataset,
-        iteration_scheme=ShuffledScheme(test_ind, batch_size))
-    test_datastream = Preprocessor_Cooking(test_datastream)
-
-    train_datastream.sources = ('features', 'targets')
-    valid_datastream.sources = ('features', 'targets')
-    test_datastream.sources = ('features', 'targets')
-
-    return train_datastream, valid_datastream
-
-
-# get_cooking_streams(100)
 
 
 class HDF5ShuffledScheme(ShuffledScheme):
@@ -775,3 +671,101 @@ def get_ucf_streams(batch_size):
 # plt.imshow(frame_7, cmap=plt.gray(), interpolation='nearest')
 # plt.savefig('png64_7.png')
 # dst, dsv = get_cooking_streams(100)
+
+
+class BMNIST(H5PYDataset):
+    def __init__(self, which_sets, **kwargs):
+        kwargs.setdefault('load_in_memory', False)
+        super(BMNIST, self).__init__(
+            ("/Tmp/pezeshki/dataset.hdf5"),
+            which_sets, **kwargs)
+
+
+class Preprocessor_BMNIST(Transformer):
+    def __init__(self, data_stream, **kwargs):
+        super(Preprocessor_BMNIST, self).__init__(
+            data_stream, **kwargs)
+
+    def get_data(self, request=None):
+        data = next(self.child_epoch_iterator)
+        transformed_data = []
+        normed_feat = data[0][:, :, np.newaxis] / 255.0
+        normed_feat = np.swapaxes(normed_feat, 0, 1)
+        transformed_data.append(normed_feat.astype(floatX))
+        transformed_data.append(data[2])
+        loc = np.swapaxes(data[1], 0, 1)
+        transformed_data.append(loc)
+        self.sources = ('features', 'targets', 'locs')
+        return transformed_data
+
+
+def get_bmnist_streams(batch_size, load_in_memory=True):
+    train_dataset = BMNIST(which_sets=["train"], load_in_memory=load_in_memory)
+    valid_dataset = BMNIST(which_sets=["valid"], load_in_memory=load_in_memory)
+    train_ind = numpy.arange(train_dataset.num_examples)
+    valid_ind = numpy.arange(valid_dataset.num_examples)
+    rng = numpy.random.RandomState(seed=1234)
+    rng.shuffle(train_ind)
+    rng.shuffle(valid_ind)
+
+    train_datastream = DataStream.default_stream(
+        train_dataset,
+        iteration_scheme=ShuffledScheme(train_ind, batch_size))
+    train_datastream = Preprocessor_BMNIST(train_datastream)
+
+    valid_datastream = DataStream.default_stream(
+        valid_dataset,
+        iteration_scheme=ShuffledScheme(valid_ind, batch_size))
+    valid_datastream = Preprocessor_BMNIST(valid_datastream)
+
+    return train_datastream, valid_datastream
+
+
+class Cooking(H5PYDataset):
+    def __init__(self, which_sets, **kwargs):
+        kwargs.setdefault('load_in_memory', False)
+        super(Cooking, self).__init__(
+            ("/Tmp/pezeshki/cooking_8585x12x125x200.hdf5"),
+            which_sets, **kwargs)
+
+
+class Preprocessor_Cooking(Transformer):
+    def __init__(self, data_stream, **kwargs):
+        super(Preprocessor_Cooking, self).__init__(
+            data_stream, **kwargs)
+
+    def get_data(self, request=None):
+        data = next(self.child_epoch_iterator)
+        transformed_data = []
+        normed_feat = data[0][:, :, np.newaxis] / 255.0
+        normed_feat = np.swapaxes(normed_feat, 0, 1)
+        normed_feat = np.swapaxes(normed_feat, 2, 5)[:, :, :, :, :, 0]
+        transformed_data.append(normed_feat.astype(floatX))
+        transformed_data.append(data[1])
+        self.sources = ('features', 'targets')
+        return transformed_data
+
+
+def get_cooking_streams(batch_size, load_in_memory=True):
+    # output shape: T x B x X x Y x C
+    train_dataset = Cooking(
+        which_sets=["train"], load_in_memory=load_in_memory)
+    valid_dataset = Cooking(
+        which_sets=["valid"], load_in_memory=load_in_memory)
+    train_ind = numpy.arange(train_dataset.num_examples)
+    valid_ind = numpy.arange(valid_dataset.num_examples)
+    rng = numpy.random.RandomState(seed=1234)
+    rng.shuffle(train_ind)
+    rng.shuffle(valid_ind)
+
+    train_datastream = DataStream.default_stream(
+        train_dataset,
+        iteration_scheme=ShuffledScheme(train_ind, batch_size))
+    train_datastream = Preprocessor_Cooking(train_datastream)
+
+    valid_datastream = DataStream.default_stream(
+        valid_dataset,
+        iteration_scheme=ShuffledScheme(valid_ind, batch_size))
+    valid_datastream = Preprocessor_Cooking(valid_datastream)
+
+    return train_datastream, valid_datastream

@@ -1,14 +1,15 @@
 import logging
 import numpy as np
 import theano
-import os
 import theano.tensor as T
 from blocks.extensions import SimpleExtension
 from blocks.roles import add_role
 from blocks.roles import AuxiliaryRole
-from crop import LocallySoftRectangularCropper
-from crop import Gaussian
+from blocks.graph import ComputationGraph
 from blocks.initialization import NdarrayInitialization
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger('main.utils')
 
@@ -65,7 +66,7 @@ class SaveParams(SimpleExtension):
         self.to_save = {}
         self.best_value = None
         self.add_condition(('after_training',), self.save)
-        self.add_condition(('on_interrupt',), self.save)
+        self.add_condition(('on_interrupt',), self.do)
         self.add_condition(('after_epoch',), self.do)
 
     def save(self, which_callback, *args):
@@ -84,10 +85,12 @@ class SaveParams(SimpleExtension):
                 to_save[p_name] = p_value.get_value()
             path = self.save_path + '/trained_params_best'
             np.savez_compressed(path, **to_save)
+        self.main_loop.log.current_row[
+            'best_' + self.early_stop_var] = self.best_value
 
 
 class SaveLog(SimpleExtension):
-    def __init__(self, dir, show=None, **kwargs):
+    def __init__(self, show=None, **kwargs):
         super(SaveLog, self).__init__(**kwargs)
 
     def do(self, which_callback, *args):
@@ -120,15 +123,21 @@ class Glorot(NdarrayInitialization):
             input_size, output_size = shape
             high = np.sqrt(6) / np.sqrt(input_size + output_size)
             m = rng.uniform(-high, high, size=shape)
-            if shape == (256, 1024):
-                high = np.sqrt(6) / np.sqrt(256 + 256)
-                mi = rng.uniform(-high, high, size=(256, 256))
-                mf = rng.uniform(-high, high, size=(256, 256))
-                mc = np.identity(256) * 0.95
-                mo = rng.uniform(-high, high, size=(256, 256))
+            if shape == (128, 512):
+                high = np.sqrt(6) / np.sqrt(256)
+                mi = rng.uniform(-high, high, size=(128, 128))
+                mf = rng.uniform(-high, high, size=(128, 128))
+                mc = rng.uniform(-high, high, size=(128, 128))  # np.identity(128) * 0.95
+                mo = rng.uniform(-high, high, size=(128, 128))
                 m = np.hstack([mi, mf, mc, mo])
+            else:
+                import ipdb
+                ipdb.set_trace
         elif len(shape) == 4:
-            high = np.sqrt(6) / np.sqrt(shape[2] + shape[3])
+            fan_in = np.prod(shape[1:])
+            poolsize = (2, 2)
+            fan_out = (shape[0] * np.prod(shape[2:]) / np.prod(poolsize))
+            high = np.sqrt(6) / np.sqrt(fan_in + fan_out)
             m = rng.uniform(-high, high, size=shape)
         return m.astype(theano.config.floatX)
 
@@ -142,167 +151,73 @@ def to_rgb1(im):
     return ret
 
 
-# im: size 10000
-# im_2: size 100 x 100 x 3
-def show_patch_on_frame(im, location_, scale_,
-                        image_shape, patch_shape=(24, 24)):
-    print "WARNING: USING THE SAME SCALE!"
-    img = to_rgb1(im.reshape(image_shape))
-    im_2 = img + np.zeros(img.shape)
-    x_0 = -(patch_shape[0] / 2) / scale_[0] + location_[0]
-    x_1 = (patch_shape[0] / 2) / scale_[0] + location_[0]
-    y_0 = -(patch_shape[1] / 2) / scale_[0] + location_[1]
-    y_1 = (patch_shape[1] / 2) / scale_[0] + location_[1]
-    if x_0 < 0:
-        x_0 = 0.0
-    if x_1 > image_shape[0]:
-        x_1 = image_shape[0]
-    if y_0 < 0:
-        y_0 = 0.0
-    if y_1 > image_shape[1]:
-        y_1 = image_shape[1]
-    im_2[x_0:x_1, y_0:y_1, 0] = 1
-
-    margin_0 = 1  # + int(1 / scale_[0])
-    margin_1 = 1  # + int(1 / scale_[1])
-    inner = img[margin_0 + x_0: -margin_0 + x_1,
-                margin_1 + y_0: -margin_1 + y_1, 0]
-
-    im_2[margin_0 + x_0: -margin_0 + x_1,
-         margin_1 + y_0: -margin_1 + y_1, 0] = inner
-
-    # import ipdb; ipdb.set_trace()
-
-    return im_2
-
-
-# ims: size times x 100000
-def show_patches_on_frames(ims, locations_, scales_,
-                           image_shape, patch_shape=(24, 24)):
-    hyperparameters = {}
-    hyperparameters["cutoff"] = 3
-    hyperparameters["batched_window"] = True
+def visualize_attention(model, configs, eval_function):
+    cropper = model.children[0]
     location = T.fmatrix()
     scale = T.fmatrix()
+    alpha = T.fmatrix()
     x = T.fvector()
-    cropper = LocallySoftRectangularCropper(
-        patch_shape=patch_shape,
-        hyperparameters=hyperparameters,
-        kernel=Gaussian())
-    patch = cropper.apply(
-        x.reshape((1, 1,) + image_shape),
-        np.array([list(image_shape)]),
-        location,
-        T.concatenate([scale, scale], axis=1))
-    get_patch = theano.function([x, location, scale], patch,
+
+    re_loc = ((location + T.ones_like(location)) *
+              configs['cropper_input_shape'] * [0.41, 0.41] +
+              configs['cropper_input_shape'] * [0.09, 0.09])
+    patch, mat = cropper.apply(
+        x.reshape((100, 3,) + configs['cropper_input_shape']),
+        np.array([list(configs['cropper_input_shape'])]),
+        re_loc,
+        ((scale + T.ones_like(scale)) / [2.0, 2.0] *
+         [0.776, 0.86] +
+         [0.224, 0.14]),
+        ((alpha + T.ones_like(scale)) / [2.0, 2.0] *
+         [0.98, 0.98] +
+         [0.001, 0.001]))
+    grads = T.grad(T.mean(patch ** 2), x).reshape(
+        (100,) + configs['cropper_input_shape'])
+    get_patch = theano.function([x, location, scale, alpha],
+                                [patch, grads],
                                 allow_input_downcast=True)
-    final_shape = (image_shape[0], image_shape[0] + patch_shape[0] + 5)
-    ret = np.ones((ims.shape[0], ) + final_shape + (3,), dtype=np.float32)
-    for i in range(ims.shape[0]):
-        im = ims[i]
-        location_ = locations_[i]
-        scale_ = scales_[i]
-        patch_on_frame = show_patch_on_frame(im, location_, scale_, image_shape)
-        ret[i, :, :image_shape[1], :] = patch_on_frame
-        ret[i, -patch_shape[0]:, image_shape[1] + 5:, :] = to_rgb1(
-            get_patch(im, [location_], [scale_])[0, 0])
-    return ret
 
+    ds, _ = configs['get_streams'](configs['batch_size'])
+    data = ds.get_epoch_iterator().next()
 
-# frames: T x F
-def visualize_attention(frames, locations, scales, image_shape, prefix=''):
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    results = show_patches_on_frames(frames, locations, scales, image_shape)
-    for i, frame in enumerate(results):
-        plt.imshow(
-            frame,
-            interpolation='nearest')
-        path = 'res' + prefix
-        if not os.path.exists(path):
-            os.makedirs(path)
-        plt.savefig(path + '/img_' + str(i) + '.png')
-    print 'success!'
+    # T x B x 1 x X x Y
+    frames = data[0]
+    inps = ComputationGraph(model.location).inputs
+    f = theano.function(inps, [model.location, model.scale, model.alpha])
+    # T x B x 2or1
+    locations, scales, alphas = f(frames, data[2])
 
+    predictions = np.argmax(
+        eval_function(data[0], data[2], data[1])[1], axis=1)
 
-def plot_curves(path, to_be_plotted=['train_categoricalcrossentropy_apply_cost', 'valid_categoricalcrossentropy_apply_cost'], yaxis='Cross Entropy',
-                titles=['train', 'valid'],
-                main_title='CE'):
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
+    for t in range(10):
+        patches, real_grads = get_patch(
+            frames[t].flatten(),
+            locations[t], scales[t], alphas[t])
+        _, grads_ = get_patch(
+            np.ones(frames[t].flatten().shape),
+            locations[t], scales[t], alphas[t])
+        grads_ = (grads_ / np.max(grads_))[:, np.newaxis]
+        grads_ = np.concatenate([grads_, grads_, grads_], axis=1)
+        grads_[:, 0] += frames[t][:, 0]
+        grads_[:, 1] = frames[t][:, 0]
+        grads_[:, 2] = frames[t][:, 0]
 
-    plt.rcParams['text.latex.preamble'] = [r"\usepackage{lmodern}"]
-    params = {'text.usetex': True,
-              'font.size': 14,
-              'font.family': 'lmodern',
-              'text.latex.unicode': True}
-    plt.rcParams.update(params)
+        real_grads = (real_grads / np.max(real_grads))[:, np.newaxis]
 
-    def parse_log(path, to_be_plotted):
-        results = {}
-        log = open(path, 'r').readlines()
-        for line in log:
-            colon_index = line.find(":")
-            enter_index = line.find("\n")
-            if colon_index != -1:
-                key = line[:colon_index]
-                value = line[colon_index + 1: enter_index]
-                if key in to_be_plotted:
-                    values = results.get(key)
-                    if values is None:
-                        results[key] = [value]
-                    else:
-                        results[key] = results[key] + [value]
-        for key in results.keys():
-            results[key] = [float(i) for i in results[key]]
-        return results
+        for exp in range(30):
+            plt.figure()
 
-    def pimp(path=None, xaxis='Epochs', yaxis='Cross Entropy', title=None):
-        plt.legend(fontsize=14)
-        plt.xlabel(r'\textbf{' + xaxis + '}')
-        plt.ylabel(r'\textbf{' + yaxis + '}')
-        plt.grid()
-        plt.title(r'\textbf{' + title + '}')
-        plt.ylim([0, worst(log1, to_be_plotted[1]) * 1.01])
-        if path is not None:
-            plt.savefig(path)
-        else:
-            plt.show()
+            plt.subplot(121)
+            plt.imshow(np.swapaxes(np.swapaxes(grads_[exp], 0, 1), 1, 2),
+                       interpolation='nearest')
 
-    def plot(x, y, xlabel='train', ylabel='dev', color='b',
-             x_steps=None, y_steps=None):
-        if x_steps is None:
-            x_steps = range(len(x))
-        if y_steps is None:
-            y_steps = range(len(y))
-        plt.plot(x_steps, x, ls=':', c=color, lw=2, label=xlabel)
-        plt.plot(y_steps, y, c=color, lw=2, label=ylabel)
+            plt.subplot(122)
+            plt.imshow(
+                np.swapaxes(np.swapaxes(patches[exp], 0, 1), 1, 2)[:, :, 0],
+                cmap=plt.get_cmap('gray'), interpolation='nearest')
 
-    def best(path, what='test_Error_rate'):
-        res = parse_log(path, [what])
-        return np.min([float(i) for i in res[what]])
-
-    def worst(path, what='test_Error_rate'):
-        res = parse_log(path, [what])
-        return np.max([float(i) for i in res[what]])
-
-    log1 = path + 'log.txt'
-    results = parse_log(log1, to_be_plotted)
-    plt.figure()
-    plot(results[to_be_plotted[0]], results[to_be_plotted[1]],
-         titles[0], titles[1], 'b')
-
-    # log2 = path + file_2
-    # results = parse_log(log2, to_be_plotted)
-    # plot(results[to_be_plotted[0]], results[to_be_plotted[1]],
-    #      titles[2], titles[3], 'r')
-
-    print 'best' + to_be_plotted[1]
-    print best(log1, to_be_plotted[1])
-    # print best(log2, 'test_Error_rate')
-    # print best(log2, 'test_CE_clean')
-
-    pimp(path=None, yaxis=yaxis, title=main_title)
-    plt.savefig(path + 'plot_' + main_title + '.png')
+            plt.tight_layout()
+            plt.savefig('sample_e' + str(exp) + '_t' + str(t) +
+                        '_p' + str(predictions[exp]) + '.png')
+            print 'sample_e' + str(exp) + '_t' + str(t) + '.png saved!'
