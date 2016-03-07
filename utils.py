@@ -47,6 +47,24 @@ class LRDecay(SimpleExtension):
         self.lr_var.set_value(np.float32(self.lrs[lr_index]))
 
 
+class ErrorPerVideo(SimpleExtension):
+    def __init__(self, model, **kwargs):
+        super(ErrorPerVideo, self).__init__(**kwargs)
+        self.model = model
+
+    def do(self, which_callback, *args):
+        import ipdb; ipdb.set_trace()
+        vds = self.main_loop.extensions[1].data_stream
+        num_batches = 1 + vds.data_stream.dataset.num_examples / vds.batch_size
+        # for i in range(9):
+        #     batch = vds.get_epoch_iterator().next()
+        # import ipdb; ipdb.set_trace()
+
+        mlp = self.main_loop.model.top_bricks[1]
+        probs = mlp.apply_outputs
+        ComputationGraph(probs).inputs
+
+
 class AttributeDict(dict):
     __getattr__ = dict.__getitem__
 

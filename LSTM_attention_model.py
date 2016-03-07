@@ -15,7 +15,7 @@ class LSTMAttention(BaseRecurrent, Initializable):
     def __init__(self, configs, **kwargs):
         super(LSTMAttention, self).__init__(**kwargs)
         self.attention_mlp_hidden_dims =\
-            configs['attention_mlp_hidden_dims'] + [6]
+            configs['attention_mlp_hidden_dims'] + [4]
         self.conv_layers = configs['conv_layers']
         self.fc_layers = configs['fc_layers']
         self.num_layers_first_half_of_conv =\
@@ -29,7 +29,9 @@ class LSTMAttention(BaseRecurrent, Initializable):
             patch_shape=self.patch_shape,
             hyperparameters={'cutoff': 3000, 'batched_window': True},
             kernel=Gaussian())
-
+        self.min_scale = [
+            (self.patch_shape[0] + 0.0) / self.cropper_input_shape[0],
+            (self.patch_shape[1] + 0.0) / self.cropper_input_shape[1]]
         self.children = [cropper, Tanh(), Rectifier()]
 
     def get_dim(self, name):
@@ -53,7 +55,7 @@ class LSTMAttention(BaseRecurrent, Initializable):
         pre_1 = tensor.dot(x, self.w_1_mlp) + self.b_1_mlp
         act_1 = relu(pre_1)
         pre_2 = (tensor.dot(act_1, self.w_2_mlp) + self.b_2_mlp +
-                 np.asarray([0.0, 0.0, -0.2, -0.2, -0.2, -0.2],
+                 np.asarray([0.0, 0.0, -0.2, -0.2],
                             dtype='float32'))
         act_2 = tanh(pre_2)
         return act_2
@@ -113,7 +115,7 @@ class LSTMAttention(BaseRecurrent, Initializable):
     # image: B x C x X x Y
     def down_sampler(self, image):
         cropper = self.children[0]
-        downn_sampled_inputs, _ = cropper.apply(
+        downn_sampled_inputs, _, _ = cropper.apply(
             image,
             np.array([list(self.cropper_input_shape)]),
             tensor.constant(
@@ -122,19 +124,11 @@ class LSTMAttention(BaseRecurrent, Initializable):
                   self.cropper_input_shape[1] / 2]]).astype('float32'),
             tensor.constant(
                 self.batch_size *
-                [[0.5, ] * 2]).astype('float32'),
+                [self.min_scale]).astype('float32'),
             tensor.constant(
                 self.batch_size *
                 [[0.001, ] * 2]).astype('float32'))
         return downn_sampled_inputs
-
-    # input: B x C x X x Y
-    # output: B x C x X x Y
-    def pre_process(self, x):
-        xx = x[:, [2, 1, 0], :, :] * 255
-        xx = xx - (
-            np.array([104, 117, 123])[None, :, None, None]).astype('float32')
-        return xx
 
     def _allocate(self):
         self.conv_ws = []
@@ -158,13 +152,13 @@ class LSTMAttention(BaseRecurrent, Initializable):
         self.b_2_mlp = shared_floatx_nans(
             (self.attention_mlp_hidden_dims[1],), name='b_2_mlp')
         self.w_1_mlp = shared_floatx_nans(
-            (np.prod(self.patch_shape) + self.lstm_dim,
+            (np.prod(self.patch_shape) + self.lstm_dim + 4,
                 self.attention_mlp_hidden_dims[0]), name='w_1_mlp')
         self.w_2_mlp = shared_floatx_nans(
             (self.attention_mlp_hidden_dims[0],
                 self.attention_mlp_hidden_dims[1]), name='w_2_mlp')
         self.W_pre_lstm = shared_floatx_nans(
-            (self.fc_layers[-1][1][1] + 6, 4 * self.lstm_dim),
+            (self.fc_layers[-1][1][1] + 4, 4 * self.lstm_dim),
             name='W_pre_lstm')
         self.b_pre_lstm = shared_floatx_nans((4 * self.lstm_dim,),
                                              name='b_pre_lstm')
@@ -174,6 +168,12 @@ class LSTMAttention(BaseRecurrent, Initializable):
                                                   name="initial_state")
         self.initial_cells = shared_floatx_zeros((self.lstm_dim,),
                                                  name="initial_cells")
+        self.initial_location = shared_floatx_zeros((2,),
+                                                 name="initial_location")
+        self.initial_scale = shared_floatx_zeros((1,),
+                                                 name="initial_scale")
+        self.initial_alpha = shared_floatx_zeros((1,),
+                                                 name="initial_alpha")
         add_role(self.W_state, WEIGHT)
         add_role(self.W_pre_lstm, WEIGHT)
         add_role(self.b_pre_lstm, BIAS)
@@ -183,6 +183,9 @@ class LSTMAttention(BaseRecurrent, Initializable):
         add_role(self.w_2_mlp, WEIGHT)
         add_role(self.initial_state_, INITIAL_STATE)
         add_role(self.initial_cells, INITIAL_STATE)
+        add_role(self.initial_location, INITIAL_STATE)
+        add_role(self.initial_scale, INITIAL_STATE)
+        add_role(self.initial_alpha, INITIAL_STATE)
         for w in self.conv_ws + self.fc_ws:
             add_role(w, WEIGHT)
         for b in self.conv_bs + self.fc_bs:
@@ -191,7 +194,8 @@ class LSTMAttention(BaseRecurrent, Initializable):
         self.parameters = [
             self.W_state, self.W_pre_lstm, self.w_1_mlp, self.w_2_mlp,
             self.b_pre_lstm, self.b_1_mlp, self.b_2_mlp, self.initial_state_,
-            self.initial_cells] +\
+            self.initial_cells, self.initial_location, self.initial_scale,
+            self.initial_alpha] +\
             self.conv_ws + self.conv_bs +\
             self.fc_ws + self.fc_bs
 
@@ -202,21 +206,20 @@ class LSTMAttention(BaseRecurrent, Initializable):
             self.biases_init.initialize(biases, self.rng)
 
     def test(self, inputs):
-        inputs2 = self.pre_process(inputs[0])
         conved_part_1 = self.apply_conv(
-            inputs2,
+            inputs[0],
             conv_layers=self.conv_layers)
         flat_conved_part_1 = conved_part_1.flatten(2)
         pre_lstm = self.apply_fc(flat_conved_part_1)
         return pre_lstm
 
     @recurrent(sequences=['inputs', 'mask'],
-               states=['states', 'cells'],
+               states=['states', 'cells', 'location', 'scale', 'alpha'],
                contexts=[],
                outputs=['states', 'cells', 'location', 'scale', 'alpha',
                         'patch', 'downn_sampled_inputs', 'conved_part_1',
                         'conved_part_2', 'pre_lstm'])
-    def apply(self, inputs, states, cells, mask=None):
+    def apply(self, inputs, states, cells, location, scale, alpha, mask=None):
         def slice_last(x, no):
             return x[:, no * self.lstm_dim: (no + 1) * self.lstm_dim]
 
@@ -248,32 +251,47 @@ class LSTMAttention(BaseRecurrent, Initializable):
         mlp_output = self.apply_attention_mlp(
             tensor.concatenate(
                 [flat_downn_sampled_inputs,
+                 0.00001 * location,
+                 0.00001 * scale,
+                 0.00001 * alpha,
                  states], axis=1))
         location = mlp_output[:, 0:2]
         location.name = 'location'
-        scale = mlp_output[:, 2:4]
+        scale = mlp_output[:, 2:3]
         scale.name = 'scale'
-        alpha = mlp_output[:, 4:]
+        alpha = mlp_output[:, 3:]
         alpha.name = 'alpha'
+
+        scale2d = tensor.concatenate([scale, scale], axis=1)
+        alpha2d = tensor.concatenate([alpha, alpha], axis=1)
 
         # inputs shape:  B x C' x X' x Y'
         # outputs shape: B x C' x X'' x Y''
-        loc_to_cropper = ((location + tensor.ones_like(location)) *
-                          self.cropper_input_shape * [0.41, 0.41] +
-                          self.cropper_input_shape * [0.09, 0.09])
-        scale_to_cropper = ((scale + tensor.ones_like(scale)) / [2.0, 2.0] *
-                            [0.776, 0.86] +
-                            [0.224, 0.14])
-        alpha_to_cropper = ((alpha + tensor.ones_like(scale)) / [2.0, 2.0] *
-                            [0.98, 0.98] +
-                            [0.001, 0.001])
+        loc_to_cropper = (
+            (location + tensor.ones_like(location)) *
+            np.array([self.cropper_input_shape[0] * 0.4,
+                      self.cropper_input_shape[0] * 0.4]).astype('float32') +
+            np.array([self.cropper_input_shape[0] * 0.1,
+                      self.cropper_input_shape[0] * 0.1]).astype('float32'))
 
-        patch, _ = cropper.apply(
+        scale_to_cropper = (
+            (scale2d + tensor.ones_like(scale2d)) *
+            np.array([
+                (1.1 - self.min_scale[0]) / 2.0,
+                (1.1 - self.min_scale[1]) / 2.0]).astype('float32') +
+            np.array(self.min_scale).astype('float32'))
+
+        alpha_to_cropper = (
+            (alpha2d + tensor.ones_like(alpha2d)) *
+            np.array([0.98 / 2.0 + 0.001,
+                      0.98 / 2.0 + 0.001]).astype('float32'))
+
+        patch, _, _ = cropper.apply(
             conved_part_1,
             np.array([list(self.cropper_input_shape)]),
             # 0.00001 * loc_to_cropper + locs,
-            # 0.00001 * scale_to_cropper + 2.3 * tensor.ones_like(scale_to_cropper),
-            # 0.00001 * alpha_to_cropper)
+            # 0.00001 * scale_to_cropper + 1.0 * tensor.ones_like(scale_to_cropper),
+            # 0.00001 * alpha_to_cropper + 0.001 * tensor.ones_like(scale_to_cropper))
             loc_to_cropper,
             scale_to_cropper,
             alpha_to_cropper)
@@ -312,4 +330,7 @@ class LSTMAttention(BaseRecurrent, Initializable):
     @application(outputs=apply.states)
     def initial_states(self, batch_size, *args, **kwargs):
         return [tensor.repeat(self.initial_state_[None, :], batch_size, 0),
-                tensor.repeat(self.initial_cells[None, :], batch_size, 0)]
+                tensor.repeat(self.initial_cells[None, :], batch_size, 0),
+                tensor.repeat(self.initial_location[None, :], batch_size, 0),
+                tensor.repeat(self.initial_scale[None, :], batch_size, 0),
+                tensor.repeat(self.initial_alpha[None, :], batch_size, 0)]

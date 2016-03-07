@@ -1,4 +1,5 @@
 import theano
+import math
 import theano.tensor as T
 import numpy as np
 from blocks.bricks import Brick, application
@@ -40,12 +41,14 @@ class LocallySoftRectangularCropper(Brick):
             # You know. Becuase of quantization, we don't get exactly zero
             # So let's make them zero!
             # import ipdb; ipdb.set_trace()
-            dx2 = dx2 - T.min(dx2, axis=1).flatten()
-            W, ret = self.kernel.density(dx2, scale, (alpha * scale), centered_J / max_val)
-            W = W / T.sum(W, axis=(0, 1))
+            # dx2 = dx2 - T.min(dx2, axis=1).flatten(2).dimshuffle(0, 'x', 1)
+            # dx2 = T.round(dx2)
+            W = self.kernel.density(dx2, scale, (alpha * scale), centered_J / max_val)
+            # sumation = T.maximum(T.sum(W, axis=(1), keepdims=True), 2.0)
+            # W = W / sumation
             Ws.append(W)
 
-        return Ws, ret
+        return Ws, dx2
 
     def compute_hard_windows(self, image_shape, location, scale):
         # find topleft(front) and bottomright(back) corners for each patch
@@ -103,10 +106,15 @@ class LocallySoftRectangularCropper(Brick):
 
 class Gaussian(object):
     def density(self, x2, scale, alpha, rng):
+        sigma = self.sigma(scale, alpha, rng)
+        volume = T.sqrt(2 * math.pi) * sigma
+        return T.exp(-0.5 * x2 / (sigma ** 2)) / volume
+
+    def sigma(self, scale, alpha, rng):
         tanhP = lambda x: 4 / (T.exp(x) + T.exp(-x)) ** 2
         sa = tanhP(rng * alpha / scale * 1.9)
         sigma = 0.5 / (scale * sa)
-        return T.exp(-0.5 * x2 / (sigma ** 2)), sa
+        return sigma
 
     def k_sigma_radius(self, k, scale):
         return k

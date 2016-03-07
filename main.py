@@ -15,7 +15,8 @@ from blocks.extensions.monitoring import (TrainingDataMonitoring,
 from blocks.bricks import Rectifier, Softmax, MLP
 from blocks.main_loop import MainLoop
 from blocks.model import Model
-from utils import SaveLog, SaveParams, Glorot, visualize_attention, LRDecay
+from utils import (SaveLog, SaveParams, Glorot, visualize_attention,
+                   LRDecay, ErrorPerVideo)
 from blocks.initialization import Constant
 from blocks.graph import ComputationGraph, apply_noise
 from LSTM_attention_model import LSTMAttention
@@ -34,6 +35,9 @@ def setup_model(configs):
     # shape: B x Classes
     target = T.ivector('targets')
 
+    # shape: B x Classes
+    unites = T.ivector('unites')
+
     model = LSTMAttention(
         configs,
         weights_init=Glorot(),
@@ -45,8 +49,9 @@ def setup_model(configs):
 
     model.location = location
     model.scale = scale
-    model.alpha = location
+    model.alpha = alpha
     model.patch = patch
+    model.downn_sampled_input = downn_sampled_input
 
     classifier = MLP(
         [Rectifier(), Softmax()],
@@ -63,6 +68,8 @@ def setup_model(configs):
     model.cost = cost
     model.error_rate = error_rate
     model.probabilities = probabilities
+    model.targets = target
+    model.unites = unites
 
     if configs['load_pretrained']:
         blocks_model = Model(model.cost)
@@ -177,6 +184,7 @@ def train(model, configs):
                        after_epoch=True),
             SaveLog(after_epoch=True),
             ProgressBar(),
+            # ErrorPerVideo(model, after_epoch=True, on_interrupt=True),
             LRDecay(lr_var, lrs, until_which_epoch,
                     after_epoch=True),
             Printing(after_epoch=True)])
@@ -184,8 +192,8 @@ def train(model, configs):
 
 
 def evaluate(model, load_path, configs):
-    print "FIX THIS"
-    with open(load_path + 'trained_params_best.npz') as f:
+    print "FIX THIS : NOT BEST"
+    with open(load_path + 'trained_params.npz') as f:
         loaded = np.load(f)
         blocks_model = Model(model.cost)
         params_dicts = blocks_model.get_parameter_dict()
@@ -195,16 +203,117 @@ def evaluate(model, load_path, configs):
             # '/f_6_.W' --> 'f_6_.W'
             slash_index = param_name.find('/')
             param_name = param_name[slash_index + 1:]
-            assert param.get_value().shape == loaded[param_name].shape
-            param.set_value(loaded[param_name])
+            # if param_name in ['initial_location', 'initial_scale', 'initial_alpha']:
+            #     param_name = 'lstmattention.' + param_name
+            if param.get_value().shape == loaded[param_name].shape:
+                param.set_value(loaded[param_name])
+            else:
+                print param
 
         inps = ComputationGraph(model.error_rate).inputs
         eval_function = theano.function(
             inps, [model.error_rate, model.probabilities])
-        _, vds = configs['get_streams'](100)
-        data = vds.get_epoch_iterator().next()
-        print "Valid_ER: " + str(
-            eval_function(data[0], data[2], data[1])[0])
+        tds, vds = configs['get_streams'](100)
+
+        train_probs = []
+        valid_probs = []
+        train_unites = []
+        valid_unites = []
+        train_labels = []
+        valid_labels = []
+
+        it = tds.get_epoch_iterator()
+        for batch in range(64):
+            print batch
+            data = it.next()
+            train_probs.append(eval_function(data[0], data[1])[1])
+            train_unites.append(data[2])
+            train_labels.append(data[1])
+
+        it = vds.get_epoch_iterator()
+        for batch in range(21):
+            print batch
+            data = it.next()
+            valid_probs.append(eval_function(data[0], data[1])[1])
+            valid_unites.append(data[2])
+            valid_labels.append(data[1])
+
+        train_probs = np.vstack(train_probs)
+        valid_probs = np.vstack(valid_probs)
+        train_labels = np.hstack(train_labels)
+        valid_labels = np.hstack(valid_labels)
+        train_unites = np.hstack(train_unites)
+        valid_unites = np.hstack(valid_unites)
+
+        # For training
+        map_vid_to_onehot = {}
+        for j in list(set(train_unites)):
+            map_vid_to_onehot[j] = []
+
+        for i in train_unites:
+            for j in list(set(train_unites)):
+                if i == j:
+                    map_vid_to_onehot[j].append(1)
+                else:
+                    map_vid_to_onehot[j].append(0)
+
+        map_vid_to_class = {}
+        for j in list(set(train_unites)):
+            onehot = np.array(map_vid_to_onehot[j])[:, np.newaxis]
+            masked = onehot * train_probs
+            map_vid_to_class[j] = np.argmax(np.sum(masked, axis=0))
+
+        predicted_labels = []
+        for i in train_unites:
+            predicted_labels.append(map_vid_to_class[i])
+
+        incorrect = 0
+        for label, predicted_label in zip(train_labels, predicted_labels):
+            if label != predicted_label:
+                incorrect = incorrect + 1
+
+        print float(incorrect) / train_unites.shape[0]
+
+        map_vid_to_onehot = {}
+        for j in list(set(train_unites)):
+            map_vid_to_onehot[j] = []
+
+        for i in train_unites:
+            for j in list(set(train_unites)):
+                if i == j:
+                    map_vid_to_onehot[j].append(1)
+                else:
+                    map_vid_to_onehot[j].append(0)
+
+        # For validation
+        map_vid_to_onehot = {}
+        for j in list(set(valid_unites)):
+            map_vid_to_onehot[j] = []
+
+        for i in valid_unites:
+            for j in list(set(valid_unites)):
+                if i == j:
+                    map_vid_to_onehot[j].append(1)
+                else:
+                    map_vid_to_onehot[j].append(0)
+
+        map_vid_to_class = {}
+        for j in list(set(valid_unites)):
+            onehot = np.array(map_vid_to_onehot[j])[:, np.newaxis]
+            masked = onehot * valid_probs
+            map_vid_to_class[j] = np.argmax(np.sum(masked, axis=0))
+
+        predicted_labels = []
+        for i in valid_unites:
+            predicted_labels.append(map_vid_to_class[i])
+
+        incorrect = 0
+        for label, predicted_label in zip(valid_labels, predicted_labels):
+            if label != predicted_label:
+                incorrect = incorrect + 1
+
+        print float(incorrect) / valid_unites.shape[0]
+
         return eval_function
 
 
@@ -242,22 +351,22 @@ if __name__ == "__main__":
     elif dataset == 'cooking':
         from datasets import get_cooking_streams
         configs['get_streams'] = get_cooking_streams
-        configs['save_path'] = 'results/Test_'
+        configs['save_path'] = 'results/Cook_2_'
         configs['num_epochs'] = 600
         configs['batch_size'] = 100
         configs['lrs'] = [1e-4, 1e-5, 1e-6]
-        configs['until_which_epoch'] = [150, 400, configs['num_epochs']]
+        configs['until_which_epoch'] = [50, 400, configs['num_epochs']]
         configs['grad_clipping'] = 2
         configs['weight_noise'] = 0.0
         configs['conv_layers'] = []
         configs['num_layers_first_half_of_conv'] = 0
-        configs['fc_layers'] = [['fc', (784, 128), 'relu']]
+        configs['fc_layers'] = [['fc', (3 * 784, 300), 'relu']]
         configs['lstm_dim'] = 128
         configs['attention_mlp_hidden_dims'] = [128]
         configs['cropper_input_shape'] = (125, 200)
         configs['patch_shape'] = (28, 28)
         configs['num_channels'] = 3
-        configs['classifier_dims'] = [configs['lstm_dim'], 64, 10]
+        configs['classifier_dims'] = [configs['lstm_dim'], 64, 31]
         configs['load_pretrained'] = False
         configs['test_model'] = True
         configs['l2_reg'] = 0.001
@@ -275,11 +384,12 @@ if __name__ == "__main__":
 
     model = setup_model(configs)
 
-    eval_ = False
+    eval_ = True
     if eval_:
-        eval_function = evaluate(model, 'results/BMNIST_Learn_2016_02_25_at_23_50/', configs)
-        analyze('results/BMNIST_Learn_2016_02_25_at_23_50/')
-        visualize_attention(model, configs, eval_function)
+        eval_function = evaluate(
+            model, 'results/Cook_2_2016_03_06_at_15_19/', configs)
+        # analyze('results/BMNIST_n_2016_03_04_at_23_37/')
+        # visualize_attention(model, configs, eval_function)
     else:
-        # evaluate(model, 'results/CMV_Hard_len10_2016_02_22_at_21_00/')
+        # evaluate(model, 'results/Cook_n_2016_03_05_at_00_42/', configs)
         train(model, configs)

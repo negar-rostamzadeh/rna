@@ -725,35 +725,50 @@ class Cooking(H5PYDataset):
     def __init__(self, which_sets, **kwargs):
         kwargs.setdefault('load_in_memory', False)
         super(Cooking, self).__init__(
-            ("/Tmp/pezeshki/cooking_8585x12x125x200.hdf5"),
+            ("/Tmp/pezeshki/cooking_8585x12x125x200_unite.hdf5"),
             which_sets, **kwargs)
 
 
 class Preprocessor_Cooking(Transformer):
-    def __init__(self, data_stream, **kwargs):
+    def __init__(self, data_stream, batch_size, **kwargs):
         super(Preprocessor_Cooking, self).__init__(
             data_stream, **kwargs)
+        self.batch_size = batch_size
 
     def get_data(self, request=None):
         data = next(self.child_epoch_iterator)
+        if data[0].shape[0] < self.batch_size:
+            data = (
+                np.concatenate(
+                    [data[0], data[0][data[0].shape[0] - self.batch_size:]], axis=0),
+                np.concatenate(
+                    [data[1], data[1][data[1].shape[0] - self.batch_size:]], axis=0))
         transformed_data = []
         normed_feat = data[0][:, :, np.newaxis] / 255.0
         normed_feat = np.swapaxes(normed_feat, 0, 1)
         normed_feat = np.swapaxes(normed_feat, 2, 5)[:, :, :, :, :, 0]
         transformed_data.append(normed_feat.astype(floatX))
-        transformed_data.append(data[1])
-        self.sources = ('features', 'targets')
+        mapping = {21: 0, 23: 1, 25: 2, 26: 3, 27: 4, 28: 5, 29: 6, 31: 7,
+                   34: 8, 35: 9, 39: 10, 40: 11, 41: 12, 42: 13, 43: 14,
+                   45: 15, 46: 16, 48: 17, 49: 18, 50: 19, 51: 20, 52: 21,
+                   53: 22, 54: 23, 55: 24, 63: 25, 69: 26, 70: 27, 71: 28,
+                   73: 29, 74: 30}
+        transformed_data.append([mapping[i] for i in data[1]])
+        transformed_data.append(data[2])
+        self.sources = ('features', 'targets', 'unites')
         return transformed_data
 
 
 def get_cooking_streams(batch_size, load_in_memory=True):
+    print '\n'
+    print "FIXXXXX THISSSS"
+    print '\n'
     # output shape: T x B x X x Y x C
-    train_dataset = Cooking(
-        which_sets=["train"], load_in_memory=load_in_memory)
-    valid_dataset = Cooking(
-        which_sets=["valid"], load_in_memory=load_in_memory)
+    train_dataset = Cooking(which_sets=["train", "valid"], load_in_memory=load_in_memory)
+    valid_dataset = Cooking(which_sets=["test"], load_in_memory=load_in_memory)
     train_ind = numpy.arange(train_dataset.num_examples)
-    valid_ind = numpy.arange(valid_dataset.num_examples)
+    print "FIXXXXX THISSSS"
+    valid_ind = numpy.arange(valid_dataset.num_examples - 2)
     rng = numpy.random.RandomState(seed=1234)
     rng.shuffle(train_ind)
     rng.shuffle(valid_ind)
@@ -761,11 +776,73 @@ def get_cooking_streams(batch_size, load_in_memory=True):
     train_datastream = DataStream.default_stream(
         train_dataset,
         iteration_scheme=ShuffledScheme(train_ind, batch_size))
-    train_datastream = Preprocessor_Cooking(train_datastream)
+    train_datastream = Preprocessor_Cooking(train_datastream, batch_size)
 
     valid_datastream = DataStream.default_stream(
         valid_dataset,
         iteration_scheme=ShuffledScheme(valid_ind, batch_size))
-    valid_datastream = Preprocessor_Cooking(valid_datastream)
+    valid_datastream = Preprocessor_Cooking(valid_datastream, batch_size)
 
     return train_datastream, valid_datastream
+
+# import matplotlib
+# matplotlib.use('Agg')
+# import matplotlib.pyplot as plt
+
+# tds, vds = get_cooking_streams(1000)
+# train_data = tds.get_epoch_iterator().next()
+# valid_data = vds.get_epoch_iterator().next()
+
+# classes = {0: 'cucumber',
+#            1: 'carrots',
+#            2: 'bread',
+#            3: 'cauliflower',
+#            4: 'onion',
+#            5: 'orange',
+#            6: 'herbs',
+#            7: 'garlic',
+#            8: 'ginger',
+#            9: 'plum',
+#            10: 'leeks',
+#            11: 'lime',
+#            12: 'pomegranate',
+#            13: 'broccli',
+#            14: 'potato',
+#            15: 'pepper',
+#            16: 'pineapple',
+#            17: 'chilli',
+#            18: 'pasta',
+#            19: 'scrambled egg',
+#            20: 'broad beans',
+#            21: 'kiwi',
+#            22: 'avocado',
+#            23: 'mango',
+#            24: 'figs',
+#            25: 'toaster',
+#            26: 'separating egg',
+#            27: 'juicing orange',
+#            28: 'hot dog',
+#            29: 'tea',
+#            30: 'coffee'}
+
+# for i in range(31):
+#     print i
+#     for t in range(12):
+#         index = train_data[1].index(i)
+#         img = train_data[0][t, index]
+#         img = np.swapaxes(img[:, :, :, np.newaxis], 0, 3)[0]
+#         plt.imshow(img, interpolation='nearest')
+#         plt.savefig('video_tr_' + str(i) + '_frame_' +
+#                     str(t) + '_class_' + str(i))
+
+# for i in range(31):
+#     print i
+#     for t in range(12):
+#         index = valid_data[1].index(i)
+#         img = valid_data[0][t, index]
+#         img = np.swapaxes(img[:, :, :, np.newaxis], 0, 3)[0]
+#         plt.imshow(img, interpolation='nearest')
+#         plt.savefig('video_vl_' + str(i) + '_frame_' +
+#                     str(t) + '_class_' + str(i))
+
+# import ipdb; ipdb.set_trace()

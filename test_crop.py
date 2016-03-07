@@ -4,6 +4,7 @@ from crop import LocallySoftRectangularCropper
 from crop import Gaussian
 import numpy as np
 from datasets import get_cooking_streams
+from datasets import get_bmnist_streams
 import matplotlib
 # Force matplotlib to not use any Xwindows backend.
 matplotlib.use('Agg')
@@ -11,29 +12,32 @@ import matplotlib.pyplot as plt
 
 
 def draw(img):
-    plt.imshow(np.swapaxes(img[:, :, :, np.newaxis], 0, 3)[0],
-               interpolation='nearest')
-
-tds, _ = get_cooking_streams(1)
-# from datasets import get_bmnist_streams
-# tds, _ = get_bmnist_streams(1)
-res = tds.get_epoch_iterator(as_dict=True).next()['features']
-# shape: 3 x 125 x 200
-img = res[5, 0]
-draw(img)
-plt.savefig('img.png')
+    if img.shape[0] == 1:
+        plt.imshow(img[0], cmap=plt.get_cmap('gray'),
+                   interpolation='nearest')
+    else:
+        plt.imshow(np.swapaxes(img[:, :, :, np.newaxis], 0, 3)[0],
+                   interpolation='nearest')
 
 location = T.fmatrix()
 scale = T.fmatrix()
 alpha = T.fmatrix()
 x = T.fvector()
 batch_size = 1
-num_channel = 3
+num_channel = 1
 patch_shape = (28, 28)
-image_shape = (125, 200)
+image_shape = (100, 100)
 hyperparameters = {}
 hyperparameters["cutoff"] = 3000
 hyperparameters["batched_window"] = True
+
+# tds, _ = get_cooking_streams(batch_size)
+tds, _ = get_bmnist_streams(1)
+res = tds.get_epoch_iterator(as_dict=True).next()['features']
+# shape: 3 x 125 x 200
+img = res[5, 0]
+draw(img)
+plt.savefig('img.png')
 
 cropper = LocallySoftRectangularCropper(
     patch_shape=patch_shape,
@@ -57,12 +61,15 @@ f = theano.function(
     allow_input_downcast=True)
 
 image = img.flatten().astype('float32')
-locations = [[60, 50], [100, 70], [10, 190]]
-scales = [[0.224, 0.14], [0.6, 0.6], [1, 1]]
+locations = [[50, 50], [100, 70], [10, 190]]
+scales = [[0.28, 0.28], [0.6, 0.6], [1, 1]]
 alphas = [[0.001, 0.001], [0.5, 0.5], [0.9, 0.9]]
 
-for i in np.arange(3):
-    for j in np.arange(3):
+res = f(image, [[50, 50]], [[0.4, 0.4]], [[0.001, 0.001]])
+import ipdb; ipdb.set_trace()
+
+for i in np.arange(1):
+    for j in np.arange(1):
         for k in np.arange(3):
             location_ = [locations[i]]
             scale_ = [scales[j]]
@@ -76,9 +83,13 @@ for i in np.arange(3):
             draw(p)
 
             plt.subplot(132)
-            g = np.abs(f(image, location_, scale_, alpha_)[1].reshape(
-                3, image_shape[0], image_shape[1]))
-            g = np.sum(g, axis=0)
+            if num_channel == 3:
+                g = np.abs(f(image, location_, scale_, alpha_)[1].reshape(
+                    3, image_shape[0], image_shape[1]))
+                g = np.sum(g, axis=0)
+            else:
+                g = np.abs(f(image, location_, scale_, alpha_)[1].reshape(
+                    image_shape[0], image_shape[1]))
             g = (g - g.mean()) / g.std()
             plt.imshow(g[1:-1, 1:-1], cmap=plt.get_cmap('gray'), interpolation='nearest')
 
