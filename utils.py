@@ -2,6 +2,8 @@ import logging
 import numpy as np
 import theano
 import theano.tensor as T
+from blocks.bricks.base import application
+from blocks.bricks.interfaces import Activation
 from blocks.extensions import SimpleExtension
 from blocks.roles import add_role
 from blocks.roles import AuxiliaryRole
@@ -12,6 +14,12 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 logger = logging.getLogger('main.utils')
+
+
+class HardTanh(Activation):
+    @application(inputs=['input_'], outputs=['output'])
+    def apply(self, input_):
+        return T.minimum(T.maximum(input_, -1), 1)
 
 
 class BnParamRole(AuxiliaryRole):
@@ -176,66 +184,92 @@ def visualize_attention(model, configs, eval_function):
     alpha = T.fmatrix()
     x = T.fvector()
 
-    re_loc = ((location + T.ones_like(location)) *
-              configs['cropper_input_shape'] * [0.41, 0.41] +
-              configs['cropper_input_shape'] * [0.09, 0.09])
-    patch, mat = cropper.apply(
-        x.reshape((100, 3,) + configs['cropper_input_shape']),
+    min_scale = [(float(configs['patch_shape'][0]) /
+                  configs['cropper_input_shape'][0]),
+                 (float(configs['patch_shape'][1]) /
+                  configs['cropper_input_shape'][1])]
+
+    re_loc = (
+        (location + T.ones_like(location)) *
+        np.array([configs['cropper_input_shape'][0] * 0.4,
+                  configs['cropper_input_shape'][1] * 0.4]).astype('float32') +
+        np.array([configs['cropper_input_shape'][0] * 0.1,
+                  configs['cropper_input_shape'][1] * 0.1]).astype('float32'))
+
+    scale2d = T.concatenate([scale, scale], axis=1)
+    alpha2d = T.concatenate([alpha, alpha], axis=1)
+
+    re_scale = (
+        (scale2d + T.ones_like(scale2d)) *
+        np.array([
+            (1.1 - min_scale[0]) / 2.0,
+            (1.1 - min_scale[1]) / 2.0]).astype('float32') +
+        np.array(min_scale).astype('float32'))
+
+    re_alpha = (
+        (alpha2d + T.ones_like(alpha2d)) *
+        np.array([0.98 / 2.0 + 0.001,
+                  0.98 / 2.0 + 0.001]).astype('float32'))
+
+    patch, mat, _ = cropper.apply(
+        x.reshape((configs['batch_size'],
+                   configs['num_channels'],) + configs['cropper_input_shape']),
         np.array([list(configs['cropper_input_shape'])]),
         re_loc,
-        ((scale + T.ones_like(scale)) / [2.0, 2.0] *
-         [0.776, 0.86] +
-         [0.224, 0.14]),
-        ((alpha + T.ones_like(scale)) / [2.0, 2.0] *
-         [0.98, 0.98] +
-         [0.001, 0.001]))
+        re_scale,
+        re_alpha)
     grads = T.grad(T.mean(patch ** 2), x).reshape(
-        (100,) + configs['cropper_input_shape'])
+        (configs['batch_size'], configs['num_channels'],) + configs['cropper_input_shape'])
     get_patch = theano.function([x, location, scale, alpha],
                                 [patch, grads],
                                 allow_input_downcast=True)
 
-    ds, _ = configs['get_streams'](configs['batch_size'])
+    _, ds = configs['get_streams'](configs['batch_size'])
     data = ds.get_epoch_iterator().next()
 
     # T x B x 1 x X x Y
     frames = data[0]
     inps = ComputationGraph(model.location).inputs
     f = theano.function(inps, [model.location, model.scale, model.alpha])
+
     # T x B x 2or1
-    locations, scales, alphas = f(frames, data[2])
+    locations, scales, alphas = f(frames)
 
     predictions = np.argmax(
-        eval_function(data[0], data[2], data[1])[1], axis=1)
+        eval_function(data[0], data[1])[1], axis=1)
 
-    for t in range(10):
-        patches, real_grads = get_patch(
-            frames[t].flatten(),
+    # over time
+    for t in range(locations.shape[0]):
+        frame = frames[t] + ds.mean[np.newaxis]
+        patches, _ = get_patch(
+            frame.flatten(),
             locations[t], scales[t], alphas[t])
         _, grads_ = get_patch(
-            np.ones(frames[t].flatten().shape),
+            np.ones(frame.flatten().shape),
             locations[t], scales[t], alphas[t])
-        grads_ = (grads_ / np.max(grads_))[:, np.newaxis]
-        grads_ = np.concatenate([grads_, grads_, grads_], axis=1)
-        grads_[:, 0] += frames[t][:, 0]
-        grads_[:, 1] = frames[t][:, 0]
-        grads_[:, 2] = frames[t][:, 0]
-
-        real_grads = (real_grads / np.max(real_grads))[:, np.newaxis]
+        grads_ = (grads_ / np.max(grads_))
+        # [:, np.newaxis]
+        # grads_ = np.concatenate([grads_, grads_, grads_], axis=1)
+        grads_[:, 0] += frame[:, 0]
+        # grads_[:, 0] = grads_[:, 0] / np.max(grads_[:, 0], axis=0, keepdims=True)
+        grads_[:, 1] = frame[:, 1]
+        grads_[:, 2] = frame[:, 2]
 
         for exp in range(30):
             plt.figure()
 
             plt.subplot(121)
-            plt.imshow(np.swapaxes(np.swapaxes(grads_[exp], 0, 1), 1, 2),
-                       interpolation='nearest')
+            img = grads_[exp]
+            img = np.swapaxes(img[:, :, :, np.newaxis], 0, 3)[0]
+            plt.imshow(img, interpolation='nearest')
 
             plt.subplot(122)
-            plt.imshow(
-                np.swapaxes(np.swapaxes(patches[exp], 0, 1), 1, 2)[:, :, 0],
-                cmap=plt.get_cmap('gray'), interpolation='nearest')
+            img = patches[exp]
+            img = np.swapaxes(img[:, :, :, np.newaxis], 0, 3)[0]
+            plt.imshow(img, interpolation='nearest')
 
             plt.tight_layout()
+            good = predictions[exp] == data[1][exp]
             plt.savefig('sample_e' + str(exp) + '_t' + str(t) +
-                        '_p' + str(predictions[exp]) + '.png')
+                        '_' + str(good) + '.png')
             print 'sample_e' + str(exp) + '_t' + str(t) + '.png saved!'

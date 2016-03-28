@@ -208,12 +208,17 @@ def evaluate(model, load_path, configs):
             if param.get_value().shape == loaded[param_name].shape:
                 param.set_value(loaded[param_name])
             else:
-                print param
+                print param_name
 
         inps = ComputationGraph(model.error_rate).inputs
         eval_function = theano.function(
             inps, [model.error_rate, model.probabilities])
-        tds, vds = configs['get_streams'](100)
+        # tds, vds = configs['get_streams'](100)
+
+        # it = tds.get_epoch_iterator()
+        # data = it.next()
+        # print eval_function(data[0], data[1])
+        return eval_function
 
         train_probs = []
         valid_probs = []
@@ -223,7 +228,7 @@ def evaluate(model, load_path, configs):
         valid_labels = []
 
         it = tds.get_epoch_iterator()
-        for batch in range(64):
+        for batch in range(6):
             print batch
             data = it.next()
             train_probs.append(eval_function(data[0], data[1])[1])
@@ -231,7 +236,7 @@ def evaluate(model, load_path, configs):
             train_labels.append(data[1])
 
         it = vds.get_epoch_iterator()
-        for batch in range(21):
+        for batch in range(2):
             print batch
             data = it.next()
             valid_probs.append(eval_function(data[0], data[1])[1])
@@ -331,11 +336,11 @@ if __name__ == "__main__":
         configs['until_which_epoch'] = [150, 400, configs['num_epochs']]
         configs['grad_clipping'] = 2
         configs['weight_noise'] = 0.0
-        configs['conv_layers'] = []
-        # configs['conv_layers'] = [                          # 1  x 28  x 28
-        #     ['conv_1', (20, 1, 5, 5), (2, 2), None],        # 20 x 16 x 16
-        #     ['conv_2', (50, 20, 5, 5), (2, 2), None],       # 50 x 10 x 10
-        #     ['conv_3', (80, 50, 3, 3), (2, 2), None]]       # 80 x 6 x 6
+        # configs['conv_layers'] = []
+        configs['conv_layers'] = [                          # 1  x 28  x 28
+            ['conv_1', (20, 1, 5, 5), (2, 2), None],        # 20 x 16 x 16
+            ['conv_2', (50, 20, 5, 5), (2, 2), None],       # 50 x 10 x 10
+            ['conv_3', (80, 50, 3, 3), (2, 2), None]]       # 80 x 6 x 6
         configs['num_layers_first_half_of_conv'] = 0
         configs['fc_layers'] = [['fc', (784, 128), 'relu']]
         configs['lstm_dim'] = 128
@@ -351,20 +356,24 @@ if __name__ == "__main__":
     elif dataset == 'cooking':
         from datasets import get_cooking_streams
         configs['get_streams'] = get_cooking_streams
-        configs['save_path'] = 'results/Cook_2_'
+        configs['save_path'] = 'results/Cook_4'
         configs['num_epochs'] = 600
         configs['batch_size'] = 100
         configs['lrs'] = [1e-4, 1e-5, 1e-6]
-        configs['until_which_epoch'] = [50, 400, configs['num_epochs']]
+        configs['until_which_epoch'] = [10, 400, configs['num_epochs']]
         configs['grad_clipping'] = 2
-        configs['weight_noise'] = 0.0
+        configs['weight_noise'] = 0.01
         configs['conv_layers'] = []
+        configs['conv_layers'] = [                          # 3   x 40  x 40
+            ['conv_1', (20, 3, 5, 5), (2, 2), None],        # 20  x 19 x 19
+            ['conv_2', (50, 20, 5, 5), (2, 2), None],       # 50  x 8 x 8
+            ['conv_3', (80, 50, 3, 3), (2, 2), None]]       # 80  x 4 x 4
         configs['num_layers_first_half_of_conv'] = 0
-        configs['fc_layers'] = [['fc', (3 * 784, 300), 'relu']]
-        configs['lstm_dim'] = 128
-        configs['attention_mlp_hidden_dims'] = [128]
-        configs['cropper_input_shape'] = (125, 200)
-        configs['patch_shape'] = (28, 28)
+        configs['fc_layers'] = [['fc', (720, 400), 'relu']]
+        configs['lstm_dim'] = 64
+        configs['attention_mlp_hidden_dims'] = [100]
+        configs['cropper_input_shape'] = (200, 320)
+        configs['patch_shape'] = (32, 32)
         configs['num_channels'] = 3
         configs['classifier_dims'] = [configs['lstm_dim'], 64, 31]
         configs['load_pretrained'] = False
@@ -384,12 +393,12 @@ if __name__ == "__main__":
 
     model = setup_model(configs)
 
-    eval_ = True
+    eval_ = False
     if eval_:
         eval_function = evaluate(
-            model, 'results/Cook_2_2016_03_06_at_15_19/', configs)
-        # analyze('results/BMNIST_n_2016_03_04_at_23_37/')
-        # visualize_attention(model, configs, eval_function)
+            model, 'results/Cook_32016_03_10_at_20_40/', configs)
+        # analyze('results/Cook_2_CNN2016_03_06_at_23_56/')
+        visualize_attention(model, configs, eval_function)
     else:
         # evaluate(model, 'results/Cook_n_2016_03_05_at_00_42/', configs)
         train(model, configs)

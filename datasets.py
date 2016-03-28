@@ -725,15 +725,16 @@ class Cooking(H5PYDataset):
     def __init__(self, which_sets, **kwargs):
         kwargs.setdefault('load_in_memory', False)
         super(Cooking, self).__init__(
-            ("/Tmp/pezeshki/cooking_8585x12x125x200_unite.hdf5"),
+            ("/Tmp/pezeshki/cooking_8585x12x200x320_unite.hdf5"),
             which_sets, **kwargs)
 
 
 class Preprocessor_Cooking(Transformer):
-    def __init__(self, data_stream, batch_size, **kwargs):
+    def __init__(self, data_stream, batch_size, mean, **kwargs):
         super(Preprocessor_Cooking, self).__init__(
             data_stream, **kwargs)
         self.batch_size = batch_size
+        self.mean = mean
 
     def get_data(self, request=None):
         data = next(self.child_epoch_iterator)
@@ -747,6 +748,7 @@ class Preprocessor_Cooking(Transformer):
         normed_feat = data[0][:, :, np.newaxis] / 255.0
         normed_feat = np.swapaxes(normed_feat, 0, 1)
         normed_feat = np.swapaxes(normed_feat, 2, 5)[:, :, :, :, :, 0]
+        normed_feat = normed_feat - self.mean[np.newaxis, np.newaxis]
         transformed_data.append(normed_feat.astype(floatX))
         mapping = {21: 0, 23: 1, 25: 2, 26: 3, 27: 4, 28: 5, 29: 6, 31: 7,
                    34: 8, 35: 9, 39: 10, 40: 11, 41: 12, 42: 13, 43: 14,
@@ -754,7 +756,7 @@ class Preprocessor_Cooking(Transformer):
                    53: 22, 54: 23, 55: 24, 63: 25, 69: 26, 70: 27, 71: 28,
                    73: 29, 74: 30}
         transformed_data.append([mapping[i] for i in data[1]])
-        transformed_data.append(data[2])
+        # transformed_data.append(data[2])
         self.sources = ('features', 'targets', 'unites')
         return transformed_data
 
@@ -773,15 +775,17 @@ def get_cooking_streams(batch_size, load_in_memory=True):
     rng.shuffle(train_ind)
     rng.shuffle(valid_ind)
 
+    mean = np.load('pixel_mean.npy')
+
     train_datastream = DataStream.default_stream(
         train_dataset,
         iteration_scheme=ShuffledScheme(train_ind, batch_size))
-    train_datastream = Preprocessor_Cooking(train_datastream, batch_size)
+    train_datastream = Preprocessor_Cooking(train_datastream, batch_size, mean)
 
     valid_datastream = DataStream.default_stream(
         valid_dataset,
         iteration_scheme=ShuffledScheme(valid_ind, batch_size))
-    valid_datastream = Preprocessor_Cooking(valid_datastream, batch_size)
+    valid_datastream = Preprocessor_Cooking(valid_datastream, batch_size, mean)
 
     return train_datastream, valid_datastream
 
@@ -845,4 +849,3 @@ def get_cooking_streams(batch_size, load_in_memory=True):
 #         plt.savefig('video_vl_' + str(i) + '_frame_' +
 #                     str(t) + '_class_' + str(i))
 
-# import ipdb; ipdb.set_trace()

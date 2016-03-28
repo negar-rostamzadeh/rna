@@ -9,6 +9,7 @@ import theano.tensor as tensor
 import numpy as np
 from crop import LocallySoftRectangularCropper
 from crop import Gaussian
+from utils import HardTanh
 
 
 class LSTMAttention(BaseRecurrent, Initializable):
@@ -32,7 +33,7 @@ class LSTMAttention(BaseRecurrent, Initializable):
         self.min_scale = [
             (self.patch_shape[0] + 0.0) / self.cropper_input_shape[0],
             (self.patch_shape[1] + 0.0) / self.cropper_input_shape[1]]
-        self.children = [cropper, Tanh(), Rectifier()]
+        self.children = [cropper, Tanh(), Rectifier(), HardTanh()]
 
     def get_dim(self, name):
         if name == 'inputs':
@@ -52,10 +53,11 @@ class LSTMAttention(BaseRecurrent, Initializable):
     def apply_attention_mlp(self, x):
         tanh = self.children[1].apply
         relu = self.children[2].apply
+        hardTanh = self.children[3].apply
         pre_1 = tensor.dot(x, self.w_1_mlp) + self.b_1_mlp
         act_1 = relu(pre_1)
         pre_2 = (tensor.dot(act_1, self.w_2_mlp) + self.b_2_mlp +
-                 np.asarray([0.0, 0.0, -0.2, -0.2],
+                 np.asarray([0.0, 0.0, -0.5, -0.5],
                             dtype='float32'))
         act_2 = tanh(pre_2)
         return act_2
@@ -81,7 +83,7 @@ class LSTMAttention(BaseRecurrent, Initializable):
             print name
             w = {w.name: w for w in self.conv_ws}[name + '_w']
             b = {b.name: b for b in self.conv_bs}[name + '_b']
-            conv = dnn_conv(out, w, border_mode='full')
+            conv = dnn_conv(out, w, border_mode=(1, 1))
             # m = conv.mean(0, keepdims=True)
             # s = conv.var(0, keepdims=True)
             # conv = (conv - m) / tensor.sqrt(s + np.float32(1e-8))
@@ -152,7 +154,7 @@ class LSTMAttention(BaseRecurrent, Initializable):
         self.b_2_mlp = shared_floatx_nans(
             (self.attention_mlp_hidden_dims[1],), name='b_2_mlp')
         self.w_1_mlp = shared_floatx_nans(
-            (np.prod(self.patch_shape) + self.lstm_dim + 4,
+            (3 * np.prod(self.patch_shape) + self.lstm_dim + 4,
                 self.attention_mlp_hidden_dims[0]), name='w_1_mlp')
         self.w_2_mlp = shared_floatx_nans(
             (self.attention_mlp_hidden_dims[0],
@@ -234,10 +236,10 @@ class LSTMAttention(BaseRecurrent, Initializable):
 
         # inputs shape:  B x C x X x Y
         # outputs shape: B x 1 x X x Y
-        if self.num_channels == 3:
-            gray_scale_inputs = self.rgb2gray(inputs)
-        else:
-            gray_scale_inputs = inputs
+        # if self.num_channels == 3:
+        #     gray_scale_inputs = self.rgb2gray(inputs)
+        # else:
+        gray_scale_inputs = inputs
 
         # inputs shape:  B x 1 x X x Y
         # outputs shape: B x 1 x X' x Y'
@@ -270,9 +272,9 @@ class LSTMAttention(BaseRecurrent, Initializable):
         loc_to_cropper = (
             (location + tensor.ones_like(location)) *
             np.array([self.cropper_input_shape[0] * 0.4,
-                      self.cropper_input_shape[0] * 0.4]).astype('float32') +
+                      self.cropper_input_shape[1] * 0.4]).astype('float32') +
             np.array([self.cropper_input_shape[0] * 0.1,
-                      self.cropper_input_shape[0] * 0.1]).astype('float32'))
+                      self.cropper_input_shape[1] * 0.1]).astype('float32'))
 
         scale_to_cropper = (
             (scale2d + tensor.ones_like(scale2d)) *
